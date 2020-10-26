@@ -1,0 +1,8 @@
+---
+
+- name: restart huginn
+  shell:
+    cmd: "bundle exec rake production:stop ; bundle exec rake production:start"
+    chdir: "/home/huginn/huginn"
+  environment:
+    RAILS_ENV: "production"

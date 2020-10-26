@@ -1,0 +1,503 @@
+---
+
+# run a couple sanity checks, mainly to see if secrets are set
+- name: Check Rails Secret Token
+  fail:
+    msg: "Change the Rails Secret Token first!"
+  when: huginn_rails_secret_token == "changeme"
+
+
+- name: Check Database password
+  fail:
+    msg: "Change the database password first!"
+  when: huginn_db_password == "changeme"
+
+
+# do not install Ruby here
+# the Huginn installation instructions ask for installing Ruby from source
+# Trying to get this working with Ruby packages (Debian/Ubuntu) and a mix of installed Gems proved to be ... a disaster
+- name: support packages
+  apt:
+    name:
+      - build-essential
+      - git
+      - zlib1g-dev
+      - libyaml-dev
+      - libssl-dev
+      - libgdbm-dev
+      - libreadline-dev
+      - libncurses5-dev
+      - libffi-dev
+      - curl
+      - checkinstall
+      - libxml2-dev
+      - libxslt-dev
+      - libcurl4-openssl-dev
+      - libicu-dev
+      - logrotate
+      - python-docutils
+      - pkg-config
+      - cmake
+      - nodejs
+      - graphviz
+      - jq
+      - wipe
+      - unzip
+      - runit-systemd
+      - mysql-client
+      - default-libmysqlclient-dev
+      - net-tools
+#      - ruby
+#      - ruby-dev
+#      - ruby-foreman
+#      - ruby-bundler
+#      - ruby-ace-rails-ap
+    state: present
+
+
+- block:
+  - name: Create "huginn" group
+    group:
+      name: huginn
+      state: present
+
+
+  - name: Create "huginn" user
+    user:
+      name: huginn
+      shell: /usr/bin/false
+      groups: huginn
+      comment: "Huginn"
+      create_home: yes
+      password: '!'
+
+  when: huginn_create_os_user == true
+
+
+- name: Set reinstall variable
+  set_fact:
+    ruby_install_required: False
+
+
+- name: Determine if Ruby is already installed
+  stat:
+    path: "/usr/local/bin/ruby"
+    follow: no
+    get_checksum: no
+    get_mime: no
+  register: ruby_installed
+  changed_when: false
+
+
+- block:
+  - name: Check Ruby version
+    shell: "/usr/local/bin/ruby -e 'print(RUBY_VERSION)'"
+    register: ruby_version_check
+    changed_when: false
+
+
+  - name: (Re)install Ruby
+    set_fact:
+      ruby_install_required: True
+    when: ruby_version_check.stdout != huginn_ruby_version
+
+  when: ruby_installed.stat.exists == True
+
+
+- block:
+  - name: Install Ruby
+    set_fact:
+      ruby_install_required: True
+
+  when: ruby_installed.stat.exists == False
+
+
+
+- block:
+  - name: Determine if Ruby source is already downloaded
+    stat:
+      path: "/home/huginn/ruby-{{ huginn_ruby_version }}.tar.bz2"
+      follow: no
+      get_checksum: no
+      get_mime: no
+    register: ruby_source_exists
+    changed_when: false
+
+
+  # deleting the source will trigger a Ruby reinstallation
+  - name: Download Ruby source
+    get_url:
+      url: "https://cache.ruby-lang.org/pub/ruby/{{ huginn_ruby_version.split('.')[0] }}.{{ huginn_ruby_version.split('.')[1] }}/ruby-{{ huginn_ruby_version }}.tar.bz2"
+      dest: "/home/huginn/ruby-{{ huginn_ruby_version }}.tar.bz2"
+      mode: 0600
+    when: ruby_source_exists.stat.exists == False
+    register: ruby_source_download
+
+
+  # new Ruby version downloaded, delete the old build directory
+  - name: Delete Ruby build directory
+    file:
+      path: "{{ huginn_build_ruby_directory }}"
+      state: absent
+    when: ruby_source_download.changed
+
+
+  - name: Create tmp build directory for Ruby install
+    file:
+      path: "{{ huginn_build_ruby_directory }}"
+      owner: root
+      group: root
+      mode: 0700
+      state: directory
+
+
+  - name: Determine if Ruby source is already unpacked
+    stat:
+      path: "{{ huginn_build_ruby_directory }}/ruby-{{ huginn_ruby_version }}"
+      follow: no
+      get_checksum: no
+      get_mime: no
+    register: ruby_source_unpacked
+    changed_when: false
+
+
+  - name: Unpack Ruby source
+    unarchive:
+      src: "/home/huginn/ruby-{{ huginn_ruby_version }}.tar.bz2"
+      dest: "{{ huginn_build_ruby_directory }}/"
+      remote_src: yes
+    when: ruby_source_unpacked.stat.exists == False
+
+
+  - name: Configure Ruby
+    shell:
+      cmd: "./configure --disable-install-rdoc"
+      chdir: "{{ huginn_build_ruby_directory }}/ruby-{{ huginn_ruby_version }}"
+      creates: "{{ huginn_build_ruby_directory }}/ruby-{{ huginn_ruby_version }}/Makefile"
+
+
+  - name: Build Ruby
+    shell:
+      cmd: "make"
+      chdir: "{{ huginn_build_ruby_directory }}/ruby-{{ huginn_ruby_version }}"
+      creates: "{{ huginn_build_ruby_directory }}/ruby-{{ huginn_ruby_version }}/verconf.h"
+    register: build_ruby
+
+
+  # installation goes to /usr/local
+  - name: Install Ruby
+    shell:
+      cmd: "make install"
+      chdir: "{{ huginn_build_ruby_directory }}/ruby-{{ huginn_ruby_version }}"
+    when: build_ruby.changed
+
+  when: ruby_install_required == True and 0 == 1
+
+
+- block:
+  - name: Install foreman
+    shell:
+      cmd: "gem install rake foreman --no-document"
+      chdir: "/tmp"
+      creates: "/usr/local/bin/foreman"
+
+
+  - name: Install bundler
+    shell:
+      cmd: "gem install bundler -v '< 2' --no-document"
+      chdir: "/tmp"
+      creates: "/usr/local/bin/bundler"
+
+
+- block:
+  - name: Update Ruby gems
+    shell:
+      cmd: "gem update --system --no-document"
+      chdir: "/tmp"
+    register: gem_update
+    changed_when: "'Successfully installed' in gem_update.stdout"
+
+
+- name: Determine if Huginn repository is already checked out
+  stat:
+    path: "/home/huginn/huginn/.git"
+    follow: no
+    get_checksum: no
+    get_mime: no
+  register: huginn_repository
+  changed_when: false
+
+
+- name: Clone huginn repository
+  git:
+    repo: 'https://github.com/huginn/huginn.git'
+    dest: '/home/huginn/huginn'
+    update: yes
+    version: "master"
+    #force: yes
+  become_user: huginn
+  when: huginn_repository.stat.exists == False
+
+
+- name: Determine if .env is already installed
+  stat:
+    path: "/home/huginn/huginn/.env"
+    follow: no
+    get_checksum: no
+    get_mime: no
+  register: huginn_env
+  changed_when: false
+
+
+# this creates a copy of the .env from the example
+# but only if the .env does not exists
+# otherwise modifications will not be overwritten
+- name: Install .env from example
+  copy:
+    src: "/home/huginn/huginn/.env.example"
+    dest: "/home/huginn/huginn/.env"
+    owner: huginn
+    group: huginn
+    mode: 0640
+    remote_src: yes
+  when: huginn_env.stat.exists == False
+
+
+- name: Create necessary directories
+  file:
+    path: "/home/huginn/huginn/{{ item.path }}"
+    owner: huginn
+    group: huginn
+    mode: "{{ item.mode }}"
+    state: directory
+  loop:
+    - { path: "log", mode: "0755" }
+    - { path: "tmp", mode: "0755" }
+    - { path: "tmp/pids", mode: "0755" }
+    - { path: "tmp/sockets", mode: "0755" }
+  loop_control:
+    label: "{{ item.path }}"
+
+
+- name: Determine if unicorn.rb is already installed
+  stat:
+    path: "/home/huginn/huginn/config/unicorn.rb"
+    follow: no
+    get_checksum: no
+    get_mime: no
+  register: huginn_unicorn_rb
+  changed_when: false
+
+
+- name: Install unicorn.rb from example
+  copy:
+    src: "/home/huginn/huginn/config/unicorn.rb.example"
+    dest: "/home/huginn/huginn/config/unicorn.rb"
+    owner: huginn
+    group: huginn
+    mode: 0640
+    remote_src: yes
+  when: huginn_unicorn_rb.stat.exists == False
+
+
+- name: Update unicorn.rb
+  lineinfile:
+    dest: "/home/huginn/huginn/config/unicorn.rb"
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    state: "{{ item.state }}"
+  loop:
+    - { regexp: '^listen ', line: 'listen "{{ huginn_listen_address }}:{{ huginn_listen_port }}"', state: present }
+
+
+- name: Set database variables
+  set_fact:
+    env_db_username: "huginn"
+    env_db_password: "{{ lookup('file', playbook_dir + '/credentials/mysql/huginn-plain.txt') }}"
+    rails_secret_token: "{{ lookup('file', playbook_dir + '/credentials/huginn/rails-secret.txt') }}"
+    twitter_api_key:  "{{ lookup('file', playbook_dir + '/credentials/huginn/twitter-api-key.txt') }}"
+    twitter_api_secret:  "{{ lookup('file', playbook_dir + '/credentials/huginn/twitter-api-secret.txt') }}"
+
+
+- name: Update .env
+  lineinfile:
+    dest: "/home/huginn/huginn/.env"
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    state: "{{ item.state }}"
+  loop:
+    - { name: 'DATABASE_ADAPTER', regexp: '^#* *DATABASE_ADAPTER', line: 'DATABASE_ADAPTER=mysql2', state: present }
+    - { name: 'DATABASE_RECONNECT', regexp: '^#* *DATABASE_RECONNECT', line: 'DATABASE_RECONNECT=true', state: present }
+    - { name: 'DATABASE_NAME', regexp: '^#* *DATABASE_NAME', line: 'DATABASE_NAME={{ huginn_db_name }}', state: present }
+    - { name: 'DATABASE_POOL', regexp: '^#* *DATABASE_POOL', line: 'DATABASE_POOL={{ huginn_db_pool_size }}', state: present }
+    - { name: 'DATABASE_USERNAME', regexp: '^#* *DATABASE_USERNAME', line: 'DATABASE_USERNAME={{ huginn_db_username }}', state: present }
+    - { name: 'DATABASE_PASSWORD', regexp: '^#* *DATABASE_PASSWORD', line: 'DATABASE_PASSWORD={{ huginn_db_password }}', state: present }
+    - { name: 'DATABASE_HOST', regexp: '^#* *DATABASE_HOST', line: 'DATABASE_HOST={{ huginn_db_host }}', state: present }
+    - { name: 'DATABASE_PORT', regexp: '^#* *DATABASE_PORT', line: 'DATABASE_PORT={{ huginn_db_port }}', state: present }
+    # older MySQL versions might not support this - get something newer
+    - { name: 'DATABASE_ENCODING', regexp: '^#* *DATABASE_ENCODING', line: 'DATABASE_ENCODING=utf8mb4', state: present }
+    - { name: 'RAILS_ENV', regexp: '^#* *RAILS_ENV', line: 'RAILS_ENV=production', state: present }
+    - { name: 'DOMAIN', regexp: '^#* *DOMAIN', line: 'DOMAIN={{ huginn_domain }}:{{ huginn_listen_port }}', state: present }
+    - { name: 'PORT', regexp: '^#* *PORT', line: 'PORT={{ huginn_listen_port }}', state: present }
+    - { name: 'APP_SECRET_TOKEN', regexp: '^#* *APP_SECRET_TOKEN', line: 'APP_SECRET_TOKEN={{ huginn_rails_secret_token }}', state: present }
+    - { name: 'SECRET_KEY_BASE', regexp: '^#* *SECRET_KEY_BASE', line: 'SECRET_KEY_BASE={{ huginn_rails_secret_token }}', state: present }
+    - { name: 'INVITATION_CODE', regexp: '^#* *INVITATION_CODE', line: 'INVITATION_CODE={{ huginn_invitation_code }}', state: present }
+    - { name: 'RAILS_SERVE_STATIC_FILES', regexp: '^#* *RAILS_SERVE_STATIC_FILES', line: 'RAILS_SERVE_STATIC_FILES=true', state: present }
+    - { name: 'FORCE_SSL', regexp: '^#* *FORCE_SSL', line: 'FORCE_SSL={{ huginn_force_ssl }}', state: present }
+  loop_control:
+    label: "{{ item.name }}"
+  notify:
+    - restart huginn
+
+
+- name: Update secret_token.rb
+  lineinfile:
+    dest: "/home/huginn/huginn/config/initializers/secret_token.rb"
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    state: "{{ item.state }}"
+  loop:
+    - { name: 'secret_key_base', regexp: 'Huginn::Application.config.secret_key_base', line: "Huginn::Application.config.secret_key_base = ENV['{{ huginn_rails_secret_token }}']", state: present }
+  loop_control:
+    label: "{{ item.name }}"
+  notify:
+    - restart huginn
+
+
+- name: Update production.rb
+  lineinfile:
+    dest: "/home/huginn/huginn/config/environments/production.rb"
+    regexp: "^  config.secret_key_base"
+    line: "  config.secret_key_base = '{{ huginn_rails_secret_token }}'"
+    state: "present"
+    insertafter: "^  config.read_encrypted_secrets"
+  notify:
+    - restart huginn
+
+
+- name: Update application.rb
+  lineinfile:
+    dest: "/home/huginn/huginn/config/application.rb"
+    regexp: "^    config.secret_key_base"
+    line: "    config.secret_key_base = '{{ huginn_rails_secret_token }}'"
+    state: "present"
+    insertafter: "^    config.encoding"
+  notify:
+    - restart huginn
+
+
+- block:
+  - name: Install Gems
+    shell:
+      cmd: "bundle install --deployment --without development test"
+      chdir: "/home/huginn/huginn"
+    become: true
+    become_user: huginn
+    register: bundle_install
+    changed_when: "'Installing ' in bundle_install.stdout"
+
+
+- name: Create database
+  shell:
+    cmd: "bundle exec rake db:create"
+    chdir: "/home/huginn/huginn"
+  environment:
+    RAILS_ENV: "production"
+    TIMEZONE: "{{ huginn_db_timezone }}"
+  become: true
+  become_user: huginn
+  register: create_database
+  changed_when:
+    - create_database.rc == 0
+    - "'already exists' not in create_database.stderr"
+
+
+- name: Migrate database
+  shell:
+    cmd: "bundle exec rake db:migrate"
+    chdir: "/home/huginn/huginn"
+  environment:
+    RAILS_ENV: "production"
+    TIMEZONE: "{{ huginn_db_timezone }}"
+  become: true
+  become_user: huginn
+  register: migrate_database
+  changed_when:
+    - migrate_database.rc == 0
+    - "': migrated' in migrate_database.stdout"
+
+
+- name: Create admin user
+  shell:
+    cmd: "bundle exec rake db:seed"
+    chdir: "/home/huginn/huginn"
+  environment:
+    RAILS_ENV: "production"
+    SEED_USERNAME: "admin"
+    SEED_PASSWORD: "{{ lookup('file', playbook_dir + '/credentials/huginn/admin-password.txt') }}"
+    TIMEZONE: "{{ huginn_db_timezone }}"
+  become: true
+  become_user: huginn
+  register: seed_database
+  changed_when:
+    - seed_database.rc == 0
+    - "'At least one User already exists' not in seed_database.stdout"
+
+
+- name: Precompile assets
+  shell:
+    cmd: "bundle exec rake assets:precompile"
+    chdir: "/home/huginn/huginn"
+  environment:
+    RAILS_ENV: "production"
+    TIMEZONE: "{{ huginn_db_timezone }}"
+  become: true
+  become_user: huginn
+  register: precompile_assets
+  changed_when:
+    - precompile_assets.rc == 0
+    - "'INFO -- : Writing' in precompile_assets.stdout"
+
+
+- name: Install Procfile
+  copy:
+    src: "{{ playbook_dir }}/files/Procfile"
+    dest: "/home/huginn/huginn/Procfile"
+    owner: huginn
+    group: users
+    mode: 0644
+  register: install_Procfile
+
+
+- name: Export init scripts
+  shell:
+    cmd: "bundle exec rake production:export"
+    chdir: "/home/huginn/huginn"
+  register: export_init_scripts
+  changed_when: false
+  when: install_Procfile.changed
+
+
+- name: Install logrotate
+  copy:
+    src: "/home/huginn/huginn/deployment/logrotate/huginn"
+    dest: "/etc/logrotate.d/huginn"
+    owner: root
+    group: root
+    mode: 0644
+    remote_src: yes
+
+
+- meta: flush_handlers
+
+
+- name: Bundle status
+  shell:
+    cmd: "bundle exec rake production:status"
+    chdir: "/home/huginn/huginn"
+  register: bundle_status
+  changed_when: false
+
+
+- debug:
+    msg: "{{ bundle_status }}"

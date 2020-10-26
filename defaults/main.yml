@@ -1,0 +1,38 @@
+---
+
+# Ruby version for Huginn
+# changing the version will trigger a reinstall
+huginn_ruby_version: "2.6.6"
+
+# wether create the OS "huginn" user
+# note: the Playbook depends on an existing "huginn" user
+huginn_create_os_user: true
+
+# this is the temporary build directory
+huginn_build_ruby_directory: "/home/huginn/install-ruby"
+
+huginn_listen_address: "127.0.0.1"
+huginn_listen_port: "3000"
+huginn_domain: "localhost"
+# true/false
+huginn_force_ssl: "false"
+
+# modify if needed
+huginn_db_name: "huginn"
+# modify if needed
+huginn_db_username: "huginn"
+# note: you have to set another password
+huginn_db_password: "changeme"
+# modify if needed
+huginn_db_host: "127.0.0.1"
+# modify if needed
+huginn_db_port: "3306"
+# number of database pool connections in Huginn
+huginn_db_pool_size: "20"
+huginn_db_timezone: "Berlin"
+
+# note: you have to set another token
+# a very long random string is sufficient
+huginn_rails_secret_token: "changeme"
+
+huginn_invitation_code: "{{ lookup('password', playbook_dir + '/huginn_invitation_code.txt chars=ascii_letters,digits length=12') }}"
